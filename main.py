@@ -2,7 +2,7 @@ import pygame
 import sys
 import json
 import math
-from threading import Thread, current_thread
+from threading import Thread, current_thread, Lock
 from threading import enumerate as get_active_threads
 from time import sleep
 
@@ -54,6 +54,8 @@ size = []
 screen_update_queue = queue.Queue()
 maze_update_queue = queue.Queue()
 config_update_queue = queue.Queue()
+
+_config_write_lock = Lock()
 
 ghosts = {}
 pending_respawns = {}
@@ -233,14 +235,26 @@ def game_exit():
     pygame.quit()
     sys.exit()
 
+def _atomic_write_json(path, data):
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, indent=4)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
 def read_config():
     if not os.path.exists(CONFIG_FILE):
         LOG.critical("Couldn't find config file")
         game_exit()
 
-    with open(CONFIG_FILE, 'r') as f:
-        c = json.load(f)
-        return c
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        LOG.error(f"config.json is invalid/truncated: {e}")
+
+        game_exit()
 
 def override_value(json_obj, path, new_value):  # function made by AI   # TODO: understand
     path_parts = path.split('.')
@@ -255,12 +269,13 @@ def update_config_direct(items):        # only use if sure that the file isn't u
         LOG.critical("Couldn't find config file")
         game_exit()
 
-    config = read_config()
-    for path, val in items.items():
-        config = override_value(config, path, val)
+    with _config_write_lock:
+        config = read_config()
+        for path, val in items.items():
+            config = override_value(config, path, val)
 
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=4)
+        # Atomic writes prevent a crash/kill mid-save from truncating config.json
+        _atomic_write_json(CONFIG_FILE, config)
 
 def update_config(player):
     last_save = False
